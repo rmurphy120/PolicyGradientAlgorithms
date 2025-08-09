@@ -105,7 +105,7 @@ def train(device: str):
     policy_nets = [PolicyNet().to(device) for _ in range(game_manager.RPSState.NUM_AGENTS)]
     value_net = ValueNet().to(device)
 
-    # Loss histories to be returned
+    # Policy history to be returned
     policies_over_time = [[[], [], []], [[], [], []]]
     prev_value_loss = -1
 
@@ -219,8 +219,8 @@ if __name__ == "__main__":
     iterations = np.arange(1, len(policies_over_time[0][0]) + 1)
     fig, axs = plt.subplots(2, 1, figsize=(8, 5))
 
+    # Plot each agent's policy over time
     for a in range(game_manager.RPSState.NUM_AGENTS):
-        # Plot for the length of the trajectories
         for action in game_manager.ActionSpace:
             axs[a].plot(iterations, policies_over_time[a][action.value], label=action.name)
         axs[a].set_xlabel('Iteration')

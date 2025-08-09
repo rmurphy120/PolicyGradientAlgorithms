@@ -12,6 +12,13 @@ import numpy as np
 import random
 
 
+# Training constants
+GAMMA = 0.7
+LEARNING_RATE = 2 ** -12
+EPSILON = .0001
+LENGTH_TO_CHECK_CONVERGENCE = 70
+
+
 class PolicyNet(nn.Module):
     def __init__(self):
         super(PolicyNet, self).__init__()
@@ -51,7 +58,7 @@ def save_policies_to_csv(filename: str, list_policy_net: list[nn.Module], device
             row = list(each.state)
             state_tensor = each.get_state_tensor(device)
             for policy_net in list_policy_net:
-                row += policy_net(state_tensor).squeeze().tolist()
+                row += policy_net(state_tensor).tolist()
             writer.writerow(row)
 
     print(f'Successfully printed to {filename}')
@@ -69,7 +76,7 @@ def save_values_to_csv(filename: str, value_net: nn.Module, device: str):
         for each in game_manager.CarState.ALL_STATES:
             row = list(each.state)
             state_tensor = each.get_state_tensor(device)
-            row.append(value_net(state_tensor).squeeze().item())
+            row.append(value_net(state_tensor).item())
             writer.writerow(row)
 
     print(f'Successfully printed to {filename}')
@@ -118,8 +125,8 @@ def compare_models(model1: nn.Module, model2: nn.Module, device: str):
     states = game_manager.CarState.ALL_STATES
     for state in states:
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-        action_probs1 = model1(state_tensor).squeeze()
-        action_probs2 = model2(state_tensor).squeeze()
+        action_probs1 = model1(state_tensor)
+        action_probs2 = model2(state_tensor)
         mean_difference += (action_probs2 - action_probs1).abs().mean().item()
 
     return mean_difference / len(states)
@@ -151,132 +158,141 @@ def next_state_circle(position: list[int]) -> game_manager.ActionSpace:
         return game_manager.ActionSpace.RIGHT
 
 
-def train(device: str):
-    # Training constants
-    gamma = 0.7
-    base_lr = 2 ** -12
-    epsilon1 = .0001
-    epsilon2 = .00001
+def zero_gradients(net: nn.Module):
+    """
+    Zero out stored gradients in the network
+    """
+    for p in net.parameters():
+        if p.grad is None:
+            p.grad = torch.zeros_like(p.data)
+        else:
+            p.grad.detach_()
+            p.grad.zero_()
 
+
+def find_losses(id: int, policy_nets: list[nn.Module], value_net: nn.Module, device: str):
+    # Get state and policies
+    state = game_manager.CarState.ALL_STATES[id]
+    state_value = value_net(state.get_state_tensor(device))
+    action_probs = [policy_nets[j](state.get_state_tensor(device)) for j in range(
+        game_manager.CarState.NUM_AGENTS)]
+    y = 0
+    avg_policy_losses = torch.zeros(game_manager.CarState.NUM_AGENTS, device=device)
+
+    # Don't sample, loop over all action pairs
+    for actions in game_manager.ActionSpace.calculate_all_actions():
+        next_states = state.transition(actions)
+
+        # Find expected Qs
+        Q = state.reward[0]
+        for each in next_states:
+            if any(each.is_off_board):
+                Q = Q + next_states[each] * GAMMA * each.reward[0]
+            else:
+                Q = Q + next_states[each] * GAMMA * value_net(each.get_state_tensor(device)).item()
+
+        # Define losses for policies and target for value
+        probs = torch.stack([
+            action_probs[a][actions[a].value]
+            for a in range(game_manager.CarState.NUM_AGENTS)
+        ])
+        joint_prob = probs.prod()
+
+        advantage = (Q - state_value) * joint_prob.item()
+        advantages = torch.stack([-advantage, advantage]).squeeze()
+        policy_losses = probs.log() * advantages
+
+        y += Q * joint_prob.item()
+
+        # Store gradients
+        for j in range(game_manager.CarState.NUM_AGENTS):
+            gradients_wrt_params(policy_nets[j], policy_losses[j])
+
+        avg_policy_losses += policy_losses.detach()
+
+    avg_policy_losses = avg_policy_losses / len(game_manager.ActionSpace.calculate_all_actions())
+
+    # Define value loss
+    value_loss = 0.5 * (y - state_value).pow(2)
+
+    return avg_policy_losses, value_loss
+
+
+def train(device: str):
     # Models
     policy_nets = [PolicyNet().to(device) for _ in range(game_manager.CarState.NUM_AGENTS)]
     value_net = ValueNet().to(device)
 
-    # Loss histories to be returned
-    policies_losses = [[], []]
-    value_losses = []
+    # Loss history to be returned
+    policy_losses_over_time = [[], []]
+    value_loss_over_time = []
+
+    # Used to average losses when checking for convergence
+    sum_policy_losses = [0] * game_manager.CarState.NUM_AGENTS
+    sum_value_losses = 0
 
     # Training loop
     pbar = tqdm(desc="Training")
     shuffled_state_ids = list(range(len(game_manager.CarState.ALL_STATES)))
-    train_policy = False
     has_converged = False
-    while not has_converged:
-        has_converged = True
-        avg_value_loss = 0
-        avg_policy_loss = [0] * game_manager.CarState.NUM_AGENTS
+    try:
+        while not has_converged:
+            random.shuffle(shuffled_state_ids)
 
-        random.shuffle(shuffled_state_ids)
+            for id in shuffled_state_ids:
+                # Zeros out gradients
+                for policy_net in policy_nets:
+                    zero_gradients(policy_net)
 
-        for id in shuffled_state_ids:
-            # Zeros out gradients
-            for policy_net in policy_nets:
-                for p in policy_net.parameters():
-                    if p.grad is None:
-                        p.grad = torch.zeros_like(p.data)
-                    else:
-                        p.grad.detach_()
-                        p.grad.zero_()
+                zero_gradients(value_net)
 
-            for p in value_net.parameters():
-                if p.grad is None:
-                    p.grad = torch.zeros_like(p.data)
-                else:
-                    p.grad.detach_()
-                    p.grad.zero_()
+                avg_policy_losses, value_loss = find_losses(id, policy_nets, value_net, device)
 
-            # Get state and policies
-            state = game_manager.CarState.ALL_STATES[id]
-            state_value = value_net(state.get_state_tensor(device)).squeeze()
-            action_probs = [policy_nets[j](state.get_state_tensor(device)).squeeze() for j in range(
-                game_manager.CarState.NUM_AGENTS)]
-            y = 0
+                # Update policy and value parameters
+                for a in range(game_manager.CarState.NUM_AGENTS):
+                    update_params(policy_nets[a], LEARNING_RATE)
 
-            # Don't sample, loop over all action pairs
-            for actions in game_manager.ActionSpace.calculate_all_actions():
-                next_states = state.transition(actions)
+                gradients_wrt_params(value_net, value_loss)
+                update_params(value_net, LEARNING_RATE)
 
-                # Find expected Qs
-                Q = state.reward[0]
-                for each in next_states:
-                    if any(each.is_off_board):
-                        Q = Q + next_states[each] * gamma * each.reward[0]
-                    else:
-                        Q = Q + next_states[each] * gamma * value_net(each.get_state_tensor(device)).squeeze().item()
+                for a in range(game_manager.CarState.NUM_AGENTS):
+                    sum_policy_losses[a] += avg_policy_losses[a].item()
+                sum_value_losses += value_loss.item()
 
-                # Define losses for policies and target for value
-                y_for_actions = Q
-                advantage = Q - state_value
-                policies_loss = []
+                # Convergence check (Checks if both agents' Q networks converged)
+                if pbar.n % LENGTH_TO_CHECK_CONVERGENCE == 0:
+                    has_converged = pbar.n > 2 * LENGTH_TO_CHECK_CONVERGENCE
 
-                for j in range(game_manager.CarState.NUM_AGENTS):
-                    prob = action_probs[j][actions[j].value]
-                    advantage *= prob.item()
-                    y_for_actions = y_for_actions * prob.item()
-                    policies_loss.append(torch.log(prob))
+                    for a in range(game_manager.CarState.NUM_AGENTS):
+                        policy_losses_over_time[a].append(sum_policy_losses[a] / LENGTH_TO_CHECK_CONVERGENCE)
+                        sum_policy_losses[a] = 0
 
-                y += y_for_actions
+                    value_loss_over_time.append(sum_value_losses / LENGTH_TO_CHECK_CONVERGENCE)
 
-                policies_loss[0] = -advantage * policies_loss[0]
-                policies_loss[1] = advantage * policies_loss[1]
+                    if (pbar.n > 2 * LENGTH_TO_CHECK_CONVERGENCE and
+                            abs(value_loss_over_time[-1] - value_loss_over_time[-2]) >= EPSILON):
+                        has_converged = False
 
-                # Store gradients
-                for j in range(game_manager.CarState.NUM_AGENTS):
-                    gradients_wrt_params(policy_nets[j], policies_loss[j])
-                    avg_policy_loss[j] += policies_loss[j].item()
+                    sum_value_losses = 0
 
-            # Define value loss
-            value_loss = 0.5 * (y - state_value).pow(2)
+                    if has_converged:
+                        break
 
-            # Update policy and value parameters
-            if train_policy:
-                for j in range(game_manager.CarState.NUM_AGENTS):
-                    update_params(policy_nets[j], base_lr)
+                    pbar.set_postfix(value_loss=f"{value_loss_over_time[-1]:.4f}")
 
-            gradients_wrt_params(value_net, value_loss)
-            update_params(value_net, base_lr)
+                pbar.update(1)
+    except KeyboardInterrupt:
+        pass
 
-            curr_loss = value_loss.item()
-
-            avg_value_loss += curr_loss
-
-        avg_value_loss /= len(game_manager.CarState.ALL_STATES)
-
-        if len(value_losses) != 0 and abs(value_losses[-1] - avg_value_loss) < epsilon1:
-            if not train_policy:
-                print(f'Policy now training. Itr {pbar.n}')
-            train_policy = True
-
-        # Convergence check
-        if len(value_losses) == 0 or abs(value_losses[-1] - avg_value_loss) >= epsilon2:
-            has_converged = False
-
-        for j in range(game_manager.CarState.NUM_AGENTS):
-            policies_losses[j].append(avg_policy_loss[j] / len(game_manager.ActionSpace.calculate_all_actions())
-                                      / len(game_manager.CarState.ALL_STATES))
-        value_losses.append(avg_value_loss)
-
-        pbar.update(1)
-        pbar.set_postfix(value_loss=f"{avg_value_loss:.4f}")
     pbar.close()
 
-    return policy_nets, value_net, policies_losses, value_losses
+    return policy_nets, value_net, policy_losses_over_time, value_loss_over_time
 
 
 if __name__ == "__main__":
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
-    policy_nets, value_net, policies_losses, value_losses = train(device=dev)
+    policy_nets, value_net, p_losses, v_losses = train(device=dev)
 
     policy_filename = 'C:\\Users\\rynom\\OneDrive - UW-Madison\\Desktop\\Java Projects\\NashEquilibriumChecker\\nash_equilibrium.csv'
     value_filename = 'converged_values.csv'
@@ -284,20 +300,20 @@ if __name__ == "__main__":
     save_policies_to_csv(policy_filename, policy_nets, dev)
     save_values_to_csv(value_filename, value_net, dev)
 
-    iterations = np.arange(1, len(value_losses) + 1)
+    iterations = np.arange(1, len(v_losses) + 1)
     fig, axs = plt.subplots(2, 1, figsize=(8, 5))
 
-    # Plot for the length of the trajectories
-    axs[0].plot(iterations, policies_losses[0], color='tab:red')
-    axs[0].plot(iterations, policies_losses[1], color='tab:blue')
+    # Plot policy losses over time
+    axs[0].plot(iterations, p_losses[0], color='tab:red')
+    axs[0].plot(iterations, p_losses[1], color='tab:blue')
     axs[0].set_xlabel('Iteration')
     axs[0].set_ylabel('Loss', color='tab:blue')
     axs[0].tick_params(axis='y', labelcolor='tab:blue')
-    axs[0].set_title('Pursuer Policy Loss')
+    axs[0].set_title('Policy Losses')
     axs[0].grid(True, linestyle='--', alpha=0.5)
 
-    # Plot for each agent's expected reward at the start of each trajectory
-    axs[1].plot(iterations, value_losses, color='tab:blue')
+    # Plot value loss over time
+    axs[1].plot(iterations, v_losses, color='tab:blue')
     axs[1].set_xlabel('Iteration')
     axs[1].set_ylabel('Loss', color='tab:blue')
     axs[1].tick_params(axis='y', labelcolor='tab:blue')
