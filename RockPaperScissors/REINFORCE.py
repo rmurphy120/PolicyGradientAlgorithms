@@ -45,7 +45,7 @@ def update_params(net: nn.Module, lr: float):
 
 
 def generate_trajectory(state: game_manager.RPSState, list_policy_net: list[nn.Module], device: str,
-                        max_episode_len=15):
+                        max_episode_len=2):
     state_at_timestep = []
     action_at_timestep = []
     reward_at_timestep = []
@@ -84,7 +84,9 @@ def train(device: str, num_trajectories: int):
 
     policy_nets = [PolicyNet().to(device) for _ in range(2)]
 
+    # Expected returns
     returns = []
+    # Policy history to be returned
     policies_over_time = [[[], [], []], [[], [], []]]
 
     # Training loop
@@ -135,14 +137,14 @@ def train(device: str, num_trajectories: int):
 if __name__ == "__main__":
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
-    num_trajectories = 50
+    num_trajectories = 3 * 20000
     nets, rets, policies_over_time = train(device=dev, num_trajectories=num_trajectories)
 
     iterations = np.arange(1, len(policies_over_time[0][0]) + 1)
     fig, axs = plt.subplots(2, 1, figsize=(8, 5))
 
+    # Plot each agent's policy over time
     for a in range(game_manager.RPSState.NUM_AGENTS):
-        # Plot for the length of the trajectories
         for action in game_manager.ActionSpace:
             axs[a].plot(iterations, policies_over_time[a][action.value], label=action.name)
         axs[a].set_xlabel('Iteration')

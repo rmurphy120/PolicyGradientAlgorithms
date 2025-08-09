@@ -45,7 +45,7 @@ class SoccerState:
         index //= 2
 
         for i in range(1, len(state)):
-            if i % 2 == 0:
+            if i % 2 == 1:
                 state[i] = index % SoccerState.WIDTH
                 index //= SoccerState.WIDTH
             else:
@@ -114,6 +114,7 @@ class SoccerState:
         self.state = state
         self.is_off_board = off_board
         self.reward = self.calculate_reward()
+        self.value = torch.tensor(self.reward, dtype=torch.float).repeat_interleave(2)
 
     def __eq__(self, other):
         return isinstance(other, SoccerState) and self.state == other.state
@@ -173,19 +174,19 @@ class SoccerState:
                 reward[0] = -25
                 reward[1] = -25
             elif self.is_off_board[0]:
-                reward[0] = 25
-                reward[1] = -25
-            elif self.is_off_board[1]:
                 reward[0] = -25
                 reward[1] = 25
+            elif self.is_off_board[1]:
+                reward[0] = 25
+                reward[1] = -25
 
         # Check if goal
         elif self.state[0] == 0 and self.in_goal(x1, y1):
-            reward[0] = -24 if x1 == 0 else 24
-            reward[1] = 24 if x1 == 0 else -24
+            reward[0] = -23 if x1 == 0 else 23
+            reward[1] = 23 if x1 == 0 else -23
         elif self.state[0] == 1 and self.in_goal(x2, y2):
-            reward[0] = -24 if x2 == 0 else 24
-            reward[1] = 24 if x2 == 0 else -24
+            reward[0] = -23 if x2 == 0 else 23
+            reward[1] = 23 if x2 == 0 else -23
 
         # Board reward
         if ball_player == 0:
