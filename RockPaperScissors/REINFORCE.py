@@ -1,4 +1,5 @@
 import game_manager
+import models
 
 import torch
 import torch.nn as nn
@@ -10,48 +11,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-class PolicyNet(nn.Module):
-    def __init__(self):
-        super(PolicyNet, self).__init__()
-        self.fc1 = nn.Linear(1, 32)
-        self.fc2 = nn.Linear(32, 16)
-        self.fc3 = nn.Linear(16, len(game_manager.ActionSpace))
-
-    def forward(self, x):
-        x = nn.functional.relu(self.fc1(x))
-        x = nn.functional.relu(self.fc2(x))
-        x = nn.functional.softmax(self.fc3(x), dim=1)
-        return x.squeeze(0)
+# Training constants
+GAMMA = 0.5
+LEARNING_RATE = 2 ** -13
+NUM_TRAJECTORIES = 3 * 20000
+MAX_EPISODE_LENGTH = 2
 
 
-def gradients_wrt_params(net: nn.Module, loss_tensor: torch.Tensor):
-    """
-    Dictionary to store gradients for each parameter
-    Compute gradients with respect to each parameter
-    """
-
-    for name, param in net.named_parameters():
-        g = grad(loss_tensor, param, retain_graph=True)[0]
-        param.grad = param.grad + g
-
-
-def update_params(net: nn.Module, lr: float):
-    """
-    Update parameters for the network
-    """
-
-    for name, param in net.named_parameters():
-        param.data += lr * param.grad
-
-
-def generate_trajectory(state: game_manager.RPSState, list_policy_net: list[nn.Module], device: str,
-                        max_episode_len=2):
+def generate_trajectory(state: game_manager.RPSState, list_policy_net: list[nn.Module], device: str):
     state_at_timestep = []
     action_at_timestep = []
     reward_at_timestep = []
     log_probs_at_timestep = []
 
-    for ep in range(max_episode_len):
+    for ep in range(MAX_EPISODE_LENGTH):
         log_probs = []
         actions = []
         # Get the policy and choose an action for each agent
@@ -78,11 +51,10 @@ def generate_trajectory(state: game_manager.RPSState, list_policy_net: list[nn.M
 
 
 def train(device: str, num_trajectories: int):
-    # Training constants
-    gamma = 0.5
-    base_lr = 2 ** -13
-
-    policy_nets = [PolicyNet().to(device) for _ in range(2)]
+    policy_nets = [
+        models.MarkovianPolicyNet(1, len(game_manager.ActionSpace)).to(device)
+        for _ in range(game_manager.RPSState.NUM_AGENTS)
+    ]
 
     # Expected returns
     returns = []
@@ -90,46 +62,44 @@ def train(device: str, num_trajectories: int):
     policies_over_time = [[[], [], []], [[], [], []]]
 
     # Training loop
-    for i in tqdm(range(num_trajectories), desc="Training"):
-        # Zeros out gradients
-        for policy_net in policy_nets:
-            for p in policy_net.parameters():
-                if p.grad is None:
-                    p.grad = torch.zeros_like(p.data)
-                else:
-                    p.grad.detach_()
-                    p.grad.zero_()
+    try:
+        for _ in tqdm(range(NUM_TRAJECTORIES), desc="Training"):
+            # Zeros out gradients
+            for policy_net in policy_nets:
+                models.zero_gradients(policy_net)
 
-        # Generate the trajectory
-        state_at_timestep, action_at_timestep, reward_at_timestep, log_probs_at_timestep = \
-            (generate_trajectory(game_manager.RPSState.get_random_state(), policy_nets, device=device))
+            # Generate the trajectory
+            state_at_timestep, action_at_timestep, reward_at_timestep, log_probs_at_timestep = \
+                (generate_trajectory(game_manager.RPSState.get_random_state(), policy_nets, device=device))
 
-        # REINFORCE update per‑step
-        for t in range(len(log_probs_at_timestep)):
-            # Calculate Q estimate
-            discounts = (gamma ** (torch.arange(t + 1, len(state_at_timestep), device=device) - t - 1))
-            rewards_tensor = torch.tensor(
-                reward_at_timestep[t + 1:],
-                device=device,
-                dtype=discounts.dtype
-            )
-            Q = rewards_tensor.transpose(0, 1) @ discounts
-            if t == 0:
-                returns.append(Q.tolist())
+            # REINFORCE update per‑step
+            for t in range(len(log_probs_at_timestep)):
+                # Calculate Q estimate
+                discounts = (GAMMA ** (torch.arange(t + 1, len(state_at_timestep), device=device) - t - 1))
+                rewards_tensor = torch.tensor(
+                    reward_at_timestep[t + 1:],
+                    device=device,
+                    dtype=discounts.dtype
+                )
+                Q = rewards_tensor.transpose(0, 1) @ discounts
+                if t == 0:
+                    returns.append(Q.tolist())
 
-            # ascent on log π(a|s) for each model
-            for j in range(len(policy_nets)):
-                loss = log_probs_at_timestep[t][j][action_at_timestep[t][j].value] * Q[j]
-                gradients_wrt_params(policy_nets[j], loss)
+                # ascent on log π(a|s) for each model
+                for j in range(len(policy_nets)):
+                    loss = log_probs_at_timestep[t][j][action_at_timestep[t][j].value] * Q[j]
+                    models.gradients_wrt_params(policy_nets[j], loss)
 
-        # Update the models parameters
-        for policy_net in policy_nets:
-            update_params(policy_net, base_lr)
+            # Update the models' parameters
+            for policy_net in policy_nets:
+                models.update_params(policy_net, LEARNING_RATE)
 
-        if state_at_timestep[0] == 0:
-            for j in range(game_manager.RPSState.NUM_AGENTS):
-                for action in range(len(game_manager.ActionSpace)):
-                    policies_over_time[j][action].append(policy_nets[j](state_at_timestep[0])[action].item())
+            if state_at_timestep[0] == 0:
+                for j in range(game_manager.RPSState.NUM_AGENTS):
+                    for action in range(len(game_manager.ActionSpace)):
+                        policies_over_time[j][action].append(policy_nets[j](state_at_timestep[0])[action].item())
+    except KeyboardInterrupt:
+        pass
 
     return policy_nets, returns, policies_over_time
 
@@ -137,8 +107,7 @@ def train(device: str, num_trajectories: int):
 if __name__ == "__main__":
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
-    num_trajectories = 3 * 20000
-    nets, rets, policies_over_time = train(device=dev, num_trajectories=num_trajectories)
+    nets, rets, policies_over_time = train(device=dev, num_trajectories=NUM_TRAJECTORIES)
 
     iterations = np.arange(1, len(policies_over_time[0][0]) + 1)
     fig, axs = plt.subplots(2, 1, figsize=(8, 5))

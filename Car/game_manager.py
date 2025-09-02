@@ -69,12 +69,15 @@ class CarState:
 
     @staticmethod
     def get_random_state() -> "CarState":
-        state = CarState.ALL_STATES[CarState.shuffledStateIds[CarState.nextId]]
-        CarState.nextId += 1
+        state = None
 
-        if CarState.nextId == len(CarState.ALL_STATES):
-            CarState.nextId = 0
-            random.shuffle(CarState.shuffledStateIds)
+        while state is None or (abs(state.state[2] - state.state[0]) - abs(state.state[3] - state.state[1])) % 2 == 1:
+            state = CarState.ALL_STATES[CarState.shuffledStateIds[CarState.nextId]]
+            CarState.nextId += 1
+
+            if CarState.nextId == len(CarState.ALL_STATES):
+                CarState.nextId = 0
+                random.shuffle(CarState.shuffledStateIds)
 
         return state
 
@@ -147,7 +150,7 @@ class CarState:
 
         # Collision reward
         if (x1, y1) == (x2, y2):
-            reward[0] += 13
+            reward[0] += 5
 
         # 0 sum game
         reward[1] = -reward[0]

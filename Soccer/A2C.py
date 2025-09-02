@@ -1,12 +1,12 @@
 import game_manager
+import models
+import helper
 
 import torch
 import torch.nn as nn
-from torch.autograd import grad
 
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import csv
 
 import numpy as np
 import random
@@ -17,157 +17,6 @@ GAMMA = 0.9
 LEARNING_RATE = 2 ** -12
 EPSILON = .0001
 LENGTH_TO_CHECK_CONVERGENCE = 70
-
-
-class PolicyNet(nn.Module):
-    def __init__(self):
-        super(PolicyNet, self).__init__()
-        self.fc1 = nn.Linear(2 * game_manager.SoccerState.NUM_AGENTS + 1, 32)
-        self.fc2 = nn.Linear(32, 16)
-        self.fc3 = nn.Linear(16, len(game_manager.ActionSpace))
-
-    def forward(self, x):
-        x = nn.functional.relu(self.fc1(x))
-        x = nn.functional.relu(self.fc2(x))
-        x = nn.functional.softmax(self.fc3(x), dim=1)
-        return x.squeeze(0)
-
-
-class ValueNet(nn.Module):
-    def __init__(self):
-        super(ValueNet, self).__init__()
-        self.fc1 = nn.Linear(2 * game_manager.SoccerState.NUM_AGENTS + 1, 32)
-        self.fc2 = nn.Linear(32, 1)
-
-    def forward(self, x):
-        x = nn.functional.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x.squeeze(-1)
-
-
-def save_policies_to_csv(filename: str, list_policy_net: list[nn.Module], device: str):
-    header = [
-        "X1", "Y1", "X2", "Y2",
-        "U1", "D1", "L1", "R1", "U2", "D2", "L2", "R2"
-    ]
-
-    with open(filename, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for each in game_manager.SoccerState.ALL_STATES:
-            row = list(each.state)
-            state_tensor = each.get_state_tensor(device)
-            for policy_net in list_policy_net:
-                row += policy_net(state_tensor).tolist()
-            writer.writerow(row)
-
-    print(f'Successfully printed to {filename}')
-
-
-def save_values_to_csv(filename: str, value_net: nn.Module, device: str):
-    """
-    Save the values of each state computed by the value net to a CSV file
-    """
-    header = ["X1", "Y1", "X2", "Y2", "V"]
-
-    with open(filename, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for each in game_manager.SoccerState.ALL_STATES:
-            row = list(each.state)
-            state_tensor = each.get_state_tensor(device)
-            row.append(value_net(state_tensor).item())
-            writer.writerow(row)
-
-    print(f'Successfully printed to {filename}')
-
-
-def gradients_wrt_params(net: nn.Module, loss_tensor: torch.Tensor):
-    """
-    Dictionary to store gradients for each parameter
-    Compute gradients with respect to each parameter
-    """
-
-    for name, param in net.named_parameters():
-        g = grad(loss_tensor, param, retain_graph=True)[0]
-        param.grad = param.grad + g
-
-
-def update_params(net: nn.Module, lr: float):
-    """
-    Update parameters for the network
-    """
-
-    for name, param in net.named_parameters():
-        param.data -= lr * param.grad
-
-
-def save_grads(net: nn.Module, suffix: int, device: str):
-    """
-    Save the gradients of the model
-    """
-    output_path = f"gradients{suffix}.txt"
-    with open(output_path, "w") as f:
-        for name, param in net.named_parameters():
-            if param.grad is None:
-                f.write(f"{name}: no gradient\n")
-            else:
-                f.write(f"{name}.grad shape={param.grad.shape}\n")
-                # Convert the tensor to a Python string
-                f.write(param.grad.to(device).numpy().tolist().__str__() + "\n\n")
-
-
-def compare_models(model1: nn.Module, model2: nn.Module, device: str):
-    """
-    Computes the average different between models of all outputs over all states
-    """
-    mean_difference = 0
-    states = game_manager.SoccerState.ALL_STATES
-    for state in states:
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-        action_probs1 = model1(state_tensor)
-        action_probs2 = model2(state_tensor)
-        mean_difference += (action_probs2 - action_probs1).abs().mean().item()
-
-    return mean_difference / len(states)
-
-
-def next_state_circle(position: list[int]) -> game_manager.ActionSpace:
-    """
-    Given a position `state = (row, col)` on a board of size height×width,
-    returns the adjacent state according to:
-      - If state is on the perimeter, move to the next perimeter cell
-        in clockwise order.
-      - Otherwise, move one step down (row + 1).
-    """
-    x, y = position
-
-    # If not on the edge: just go down
-    if 0 < y < game_manager.SoccerState.HEIGHT - 1 and 0 < x < game_manager.SoccerState.HEIGHT - 1:
-        return game_manager.ActionSpace.DOWN
-
-    if x == 0:
-        if y == 0:
-            return game_manager.ActionSpace.RIGHT
-        return game_manager.ActionSpace.UP
-    if y == game_manager.SoccerState.HEIGHT - 1:
-        return game_manager.ActionSpace.LEFT
-    if x == game_manager.SoccerState.WIDTH - 1:
-        return game_manager.ActionSpace.DOWN
-    if y == 0:
-        return game_manager.ActionSpace.RIGHT
-
-
-def zero_gradients(net: nn.Module):
-    """
-    Zero out stored gradients in the network
-    """
-    for p in net.parameters():
-        if p.grad is None:
-            p.grad = torch.zeros_like(p.data)
-        else:
-            p.grad.detach_()
-            p.grad.zero_()
 
 
 def find_losses(id: int, policy_nets: list[nn.Module], value_net: nn.Module, device: str):
@@ -206,7 +55,7 @@ def find_losses(id: int, policy_nets: list[nn.Module], value_net: nn.Module, dev
 
         # Store gradients
         for j in range(game_manager.SoccerState.NUM_AGENTS):
-            gradients_wrt_params(policy_nets[j], policy_losses[j])
+            models.gradients_wrt_params(policy_nets[j], policy_losses[j])
 
         avg_policy_losses += policy_losses.detach()
 
@@ -220,8 +69,11 @@ def find_losses(id: int, policy_nets: list[nn.Module], value_net: nn.Module, dev
 
 def train(device: str):
     # Models
-    policy_nets = [PolicyNet().to(device) for _ in range(game_manager.SoccerState.NUM_AGENTS)]
-    value_net = ValueNet().to(device)
+    policy_nets = [
+        models.MarkovianPolicyNet(2 * game_manager.SoccerState.NUM_AGENTS + 1, len(game_manager.ActionSpace)).to(device)
+        for _ in range(game_manager.SoccerState.NUM_AGENTS)
+    ]
+    value_net = models.ValueNet(2 * game_manager.SoccerState.NUM_AGENTS + 1 , 1).to(device)
 
     # Loss history to be returned
     policy_losses_over_time = [[], []]
@@ -242,18 +94,18 @@ def train(device: str):
             for id in shuffled_state_ids:
                 # Zeros out gradients
                 for policy_net in policy_nets:
-                    zero_gradients(policy_net)
+                    models.zero_gradients(policy_net)
 
-                zero_gradients(value_net)
+                models.zero_gradients(value_net)
 
                 avg_policy_losses, value_loss = find_losses(id, policy_nets, value_net, device)
 
                 # Update policy and value parameters
                 for a in range(game_manager.SoccerState.NUM_AGENTS):
-                    update_params(policy_nets[a], LEARNING_RATE)
+                    models.update_params(policy_nets[a], LEARNING_RATE)
 
-                gradients_wrt_params(value_net, value_loss)
-                update_params(value_net, LEARNING_RATE)
+                models.gradients_wrt_params(value_net, value_loss)
+                models.update_params(value_net, LEARNING_RATE)
 
                 for a in range(game_manager.SoccerState.NUM_AGENTS):
                     sum_policy_losses[a] += avg_policy_losses[a].item()
@@ -292,13 +144,13 @@ def train(device: str):
 if __name__ == "__main__":
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
-    policy_nets, value_net, p_losses, v_losses = train(device=dev)
+    p_nets, v_net, p_losses, v_losses = train(device=dev)
 
-    policy_filename = 'C:\\Users\\rynom\\OneDrive - UW-Madison\\Desktop\\Java Projects\\NashEquilibriumChecker\\nash_equilibrium.csv'
+    """policy_filename = 'C:\\Users\\rynom\\OneDrive - UW-Madison\\Desktop\\Java Projects\\NashEquilibriumChecker\\nash_equilibrium.csv'
     value_filename = 'converged_values.csv'
 
-    save_policies_to_csv(policy_filename, policy_nets, dev)
-    save_values_to_csv(value_filename, value_net, dev)
+    helper.save_policies_to_csv(policy_filename, p_nets, game_manager.SoccerState.ALL_STATES, dev)
+    helper.save_values_to_csv(value_filename, [v_net], game_manager.SoccerState.ALL_STATES, dev)"""
 
     iterations = np.arange(1, len(v_losses) + 1)
     fig, axs = plt.subplots(2, 1, figsize=(8, 5))

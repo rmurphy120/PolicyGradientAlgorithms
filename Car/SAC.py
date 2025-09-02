@@ -1,12 +1,12 @@
 import game_manager
+import models
+import helper
 
 import torch
 import torch.nn as nn
-from torch.autograd import grad
 
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import csv
 
 import numpy as np
 import random
@@ -21,102 +21,6 @@ LENGTH_TO_CHECK_CONVERGENCE = 70
 TARGET_ENTROPY = 0.98 * -np.log(1 / len(game_manager.ActionSpace))
 ALPHA_INITIAL = 1
 TARGET_UPDATE_LENGTH = 5
-
-
-class PolicyNet(nn.Module):
-    def __init__(self):
-        super(PolicyNet, self).__init__()
-        self.fc1 = nn.Linear(2 * game_manager.CarState.NUM_AGENTS, 32)
-        self.fc2 = nn.Linear(32, 16)
-        self.fc3 = nn.Linear(16, len(game_manager.ActionSpace))
-
-    def forward(self, x):
-        x = nn.functional.relu(self.fc1(x))
-        x = nn.functional.relu(self.fc2(x))
-        x = nn.functional.softmax(self.fc3(x), dim=1)
-        return x.squeeze()
-
-
-class ValueNet(nn.Module):
-    def __init__(self):
-        super(ValueNet, self).__init__()
-        self.fc1 = nn.Linear(2 * game_manager.CarState.NUM_AGENTS, 32)
-        self.fc2 = nn.Linear(32, 1)
-
-    def forward(self, x):
-        x = nn.functional.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x.squeeze()
-
-
-def save_policies_to_csv(filename: str, list_policy_net: list[nn.Module], device: str):
-    header = [
-        "X1", "Y1", "X2", "Y2",
-        "U1", "D1", "L1", "R1", "U2", "D2", "L2", "R2"
-    ]
-
-    with open(filename, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for each in game_manager.CarState.ALL_STATES:
-            row = list(each.state)
-            state_tensor = each.get_state_tensor(device)
-            for policy_net in list_policy_net:
-                row += policy_net(state_tensor).tolist()
-            writer.writerow(row)
-
-    print(f'Successfully printed to {filename}')
-
-
-def save_values_to_csv(filename: str, value_nets: list[nn.Module], device: str):
-    """
-    Save the values of each state computed by the value net to a CSV file
-    """
-    header = ["X1", "Y1", "X2", "Y2", "V1", "V2"]
-
-    with open(filename, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        for each in game_manager.CarState.ALL_STATES:
-            row = list(each.state)
-            state_tensor = each.get_state_tensor(device)
-            for value_net in value_nets:
-                row.append(value_net(state_tensor).item())
-            writer.writerow(row)
-
-    print(f'Successfully printed to {filename}')
-
-
-def gradients_wrt_params(net: nn.Module, loss_tensor: torch.Tensor):
-    """
-    Dictionary to store gradients for each parameter
-    Compute gradients with respect to each parameter
-    """
-
-    for name, param in net.named_parameters():
-        g = grad(loss_tensor, param, retain_graph=True)[0]
-        param.grad = param.grad + g
-
-
-def update_params(net: nn.Module, lr: float):
-    """
-    Update parameters for the network
-    """
-
-    for name, param in net.named_parameters():
-        param.data -= lr * param.grad
-
-
-def zero_gradients(net: nn.Module):
-    """
-    Zero out stored gradients in the network
-    """
-    for p in net.parameters():
-        if p.grad is None:
-            p.grad = torch.zeros_like(p.data)
-        else:
-            p.grad.detach_()
-            p.grad.zero_()
 
 
 def find_losses(id: int, policy_nets: list[nn.Module], value_nets: list[nn.Module], target_value_nets: list[nn.Module],
@@ -165,7 +69,7 @@ def find_losses(id: int, policy_nets: list[nn.Module], value_nets: list[nn.Modul
 
         # Store gradients wrt policy parameters
         for a in range(game_manager.CarState.NUM_AGENTS):
-            gradients_wrt_params(policy_nets[a], policy_losses[a])
+            models.gradients_wrt_params(policy_nets[a], policy_losses[a])
 
         avg_policy_losses = avg_policy_losses + policy_losses.detach()
 
@@ -190,9 +94,18 @@ def train(device: str):
     alphas_optimiser = [torch.optim.Adam([log_alphas[a]], lr=LEARNING_RATE) for a in range(game_manager.CarState.NUM_AGENTS)]
 
     # Models
-    policy_nets = [PolicyNet().to(device) for _ in range(game_manager.CarState.NUM_AGENTS)]
-    value_nets = [ValueNet().to(device) for _ in range(2 * game_manager.CarState.NUM_AGENTS)]
-    target_value_nets = [ValueNet().to(device) for _ in range(2 * game_manager.CarState.NUM_AGENTS)]
+    policy_nets = [
+        models.MarkovianPolicyNet(2 * game_manager.CarState.NUM_AGENTS, len(game_manager.ActionSpace)).to(device)
+        for _ in range(game_manager.CarState.NUM_AGENTS)
+    ]
+    value_nets = [
+        models.ValueNet(2 * game_manager.CarState.NUM_AGENTS, 1).to(device)
+                  for _ in range(2 * game_manager.CarState.NUM_AGENTS)
+    ]
+    target_value_nets = [
+        models.ValueNet(2 * game_manager.CarState.NUM_AGENTS, 1).to(device)
+        for _ in range(2 * game_manager.CarState.NUM_AGENTS)
+    ]
 
     # Loss histories to be returned
     policy_losses_over_time = [[] for _ in range(game_manager.CarState.NUM_AGENTS)]
@@ -213,9 +126,9 @@ def train(device: str):
             for id in shuffled_state_ids:
                 # Zeros out gradients
                 for policy_net in policy_nets:
-                    zero_gradients(policy_net)
+                    models.zero_gradients(policy_net)
                 for value_net in value_nets:
-                    zero_gradients(value_net)
+                    models.zero_gradients(value_net)
 
                 # Update target nets
                 if pbar.n % TARGET_UPDATE_LENGTH == 0:
@@ -227,14 +140,14 @@ def train(device: str):
 
                 # Update policy, value, and temp parameters
                 for a in range(game_manager.CarState.NUM_AGENTS):
-                    update_params(policy_nets[a], LEARNING_RATE)
+                    models.update_params(policy_nets[a], LEARNING_RATE)
 
                     sum_policy_losses[a] += avg_policy_losses[a].item()
 
-                    gradients_wrt_params(value_nets[2*a], value_losses[2*a])
-                    update_params(value_nets[2*a], LEARNING_RATE)
-                    gradients_wrt_params(value_nets[2*a+1], value_losses[2*a+1])
-                    update_params(value_nets[2*a+1], LEARNING_RATE)
+                    models.gradients_wrt_params(value_nets[2*a], value_losses[2*a])
+                    models.update_params(value_nets[2*a], LEARNING_RATE)
+                    models.gradients_wrt_params(value_nets[2*a+1], value_losses[2*a+1])
+                    models.update_params(value_nets[2*a+1], LEARNING_RATE)
 
                     sum_value_losses[a] += value_losses[2*a].item() + value_losses[2*a+1].item()
 
@@ -276,11 +189,11 @@ if __name__ == "__main__":
 
     p_nets, v_nets, p_losses, v_losses = train(device=dev)
 
-    policy_filename = 'C:\\Users\\rynom\\OneDrive - UW-Madison\\Desktop\\Java Projects\\NashEquilibriumChecker\\nash_equilibrium.csv'
+    """policy_filename = 'C:\\Users\\rynom\\OneDrive - UW-Madison\\Desktop\\Java Projects\\NashEquilibriumChecker\\nash_equilibrium.csv'
     value_filename = 'converged_values.csv'
 
-    save_policies_to_csv(policy_filename, p_nets, dev)
-    save_values_to_csv(value_filename, v_nets, dev)
+    helper.save_policies_to_csv(policy_filename, p_nets, game_manager.CarState.ALL_STATES, dev)
+    helper.save_values_to_csv(value_filename, v_nets, game_manager.CarState.ALL_STATES, dev)"""
 
     iterations = np.arange(1, len(p_losses[0]) + 1)
     fig, axs = plt.subplots(2, 1, figsize=(8, 5))
